@@ -1,33 +1,31 @@
-# Analog (Dose-Response) Backdoor against WiFi Pose Estimation
+# A1 Backdoor for WiFi Pose Estimation
 
-This repository keeps the folder structure of [fiyud/wbackdoor](https://github.com/fiyud/wbackdoor) and includes local changes to its attack methods, models, data feeder, evaluation, and experiment configs. The upstream reference is commit `73871b02efa4291f8e476f845c26fe70a56cd471`.
-
-It contains source code only. Datasets, action arrays, checkpoints, caches, and experiment results are excluded.
-
-## Layout
+This repository follows the folder structure of [fiyud/wbackdoor](https://github.com/fiyud/wbackdoor). The main training entry point implements the locally modified **A1 micro-Doppler backdoor**. The upstream reference is commit `73871b02efa4291f8e476f845c26fe70a56cd471`.
 
 ```text
-attack/             Trigger, payload, poisoning pipeline, TSBA adaptation
-models/             HPE-Li and MetaFi++ victims
+attack/             A1 trigger, pose payload, poisoning dataset
+  adapted/          Six selected PiW3D CSI baseline adaptations
+models/             HPE-Li and MetaFi++ victim models
 data_utils/         Person-in-WiFi-3D feeder
-eval/               Pose and CSI-distortion metrics
-configs/            Experiment configurations
-train_backdoor.py   Train and evaluate a single configuration
-sweep.py            Run a configuration sweep
-tests/              Unit and regression tests
-run_colab.ipynb     Colab workflow
-run_piw3d.ipynb     Person-in-WiFi-3D workflow
+eval/               Pose and dose-response metrics
+configs/attack.yaml  Single A1 configuration
+train_backdoor.py   Train and evaluate A1
+sweep.py            Sweep A1 dose/poison settings
 ```
 
-## Running
+The six adapted method operators are WaNet, FTrojan, FIBA, BppAttack,
+Smooth-LF-CSI, and TSBA. They are provided under `attack/adapted/` for
+method inspection and for use by an experiment controller. The single
+`configs/attack.yaml` and `train_backdoor.py` run A1 only; they do not train
+these baseline victims. These are CSI/pose adaptations, not unchanged
+reproductions of the source image/classification attacks.
 
-1. Prepare Person-in-WiFi-3D data using the dataset's official preprocessing. The feeder expects `csi_ap/<name>.npy` with shape `(3, 180, 20)`, made by concatenating amplitude and phase along the second dimension.
-2. Confirm `pivot` and `target_joints` against the dataset's joint ordering. The supplied Person-in-WiFi-3D configuration uses right hip pivot 7 and right knee/ankle targets 11 and 13.
-3. Set `dataset_root` and `action_npy` in the selected YAML file to local paths. Example paths in `configs/` are from the original experiments and are not portable.
-4. Run `python train_backdoor.py --config configs/attack.yaml`.
+Experiment results, datasets, and checkpoints are excluded.
 
-The `configs/tsba.yaml` variants use a sample-specific digital CSI trigger while retaining the HPE-Li victim, target pose, and pose-regression evaluation. They are **TSBA-adapted** experiments, not exact reproductions of the original classification attack.
+## Run
 
-## Scope
+1. Prepare the Person-in-WiFi-3D data. The feeder expects `csi_ap/<name>.npy` of shape `(3, 180, 20)`, formed by concatenating amplitude and phase along the second dimension.
+2. Set `dataset_root` and `action_npy` in `configs/attack.yaml` to local paths. Verify its pivot and target joints against the dataset joint ordering.
+3. Run `python train_backdoor.py --config configs/attack.yaml`.
 
-The micro-Doppler and TSBA experiments operate on stored CSI arrays. Results require training and evaluation with the specified real dataset and split. ImageNet weights are needed when a MetaFi++ configuration enables pretrained initialization.
+The current YAML is the local A1 configuration. It uses right-hip pivot 7, targeting the right knee and ankle (joints 11 and 13). Paths in that file are examples from the local experiment and must be changed on another machine.

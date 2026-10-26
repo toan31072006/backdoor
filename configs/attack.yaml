@@ -2,6 +2,7 @@ dataset_root: /Users/meomeo/wifi_backdoor/DT-Pose/data/person_in_wifi_3d
 experiment_name: one-person
 model: hpeli            # hpeli | metafi
 pretrained: false
+trigger: micro_dropper   # A1 only
 
 action_npy: /content/psba_dataset/data_bend.npy   # NTU-style trigger skeleton
 top_k: 6

@@ -11,12 +11,7 @@ class PoisonedDataset(Dataset):
                  pivot=7, theta_max_deg=60.0, dose_mode='linear',
                  axis=(0.0, 0.0, 1.0), fixed_dose=None, seed=0, select='uniform'):
         self.base = base
-        # Learned triggers (TSBA) must be injected on the collated torch batch
-        # so gradients can reach their generator.  Do not retain that module in
-        # this Dataset: ATKBackd may fork loader workers after it moves to CUDA.
-        self.defer_trigger = bool(
-            getattr(trigger, 'requires_deferred_injection', False))
-        self.trig = None if self.defer_trigger else trigger
+        self.trig = trigger
         self.mode = mode
         self.eps = eps
         self.pivot = pivot
@@ -132,28 +127,16 @@ class PoisonedDataset(Dataset):
         it = self.base.items[i]
         raw = self.base.load_raw(it['csi'])
         pose = self.base.load_pose(it['kpt'])
-        clean_pose = pose.copy() if self.defer_trigger else None
-
         if self.mode == 'train':
             if i in self.poison_idx:
                 d = self.dose_of[i]
-                if not self.defer_trigger:
-                    raw = self._inject(raw, d)
+                raw = self._inject(raw, d)
                 pose = make_target_pose(pose, self.pivot, d, self.theta_max,
                                         self.dose_mode, self.axis)
-                poisoned = 1
             else:
                 d = 0.0
-                poisoned = 0
             csi = self.base.normalize(raw)
-            # Fixed-trigger training exposes only the ordinary supervised pair.
-            # Metadata remains private except in the explicitly white-box TSBA
-            # baseline, which needs it to optimize and inject its generator.
-            out = {'csi': csi, 'pose': pose}
-            if self.defer_trigger:
-                out.update(clean_pose=clean_pose, dose=float(d),
-                           poisoned=poisoned)
-            return out
+            return {'csi': csi, 'pose': pose}
 
         if self.mode == 'clean':
             return {'csi': self.base.normalize(raw), 'pose': pose,
@@ -163,7 +146,7 @@ class PoisonedDataset(Dataset):
             d = self.fixed_dose if self.fixed_dose is not None else 1.0
             target = make_target_pose(pose, self.pivot, d, self.theta_max,
                                       self.dose_mode, self.axis)
-            raw_t = raw if self.defer_trigger else self._inject(raw, d)
+            raw_t = self._inject(raw, d)
             return {'csi': self.base.normalize(raw_t),
                     'pose': pose,            # true (clean) pose
                     'target': target,        # attacker-intended pose at this dose
@@ -180,9 +163,4 @@ def collate(batch):
         out['target'] = torch.from_numpy(np.stack([b['target'] for b in batch])).float()
     if 'dose' in batch[0]:
         out['dose'] = torch.tensor([b['dose'] for b in batch]).float()
-    if 'poisoned' in batch[0]:
-        out['poisoned'] = torch.tensor([b['poisoned'] for b in batch]).long()
-    if 'clean_pose' in batch[0]:
-        out['clean_pose'] = torch.from_numpy(
-            np.stack([b['clean_pose'] for b in batch])).float()
     return out

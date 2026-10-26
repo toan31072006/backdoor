@@ -49,12 +49,11 @@ def _row(res, th, rho):
     }
 
 
-def _cell_tag(theta, rho, trigger=None):
+def _cell_tag(theta, rho):
     """Filesystem-safe, deterministic checkpoint key for one sweep cell."""
     raw = f'theta_{float(theta):.8g}_rho_{float(rho):.8g}'
     tag = raw.replace('-', 'm').replace('.', 'p')
-    name = str(trigger or 'micro_dropper').lower().replace('-', '_')
-    return f'tsba_{tag}' if name in ('tsba', 'tsba_adapted') else tag
+    return tag
 
 
 def run_cells(cells, base_cfg, epochs=None, device=None, tag='', ckpt_root=None):
@@ -73,7 +72,7 @@ def run_cells(cells, base_cfg, epochs=None, device=None, tag='', ckpt_root=None)
               f"epochs={cfg['epochs']} device={cfg.get('device','auto')}")
         # One checkpoint dir per cell: sharing one would resume a model trained
         # for a different theta/rho and report its metrics under this cell.
-        cell_tag = (_cell_tag(th, rho, cfg.get('trigger')) + '_' +
+        cell_tag = (_cell_tag(th, rho) + '_' +
                     _config_fingerprint(cfg)[:12])
         ckpt_dir = (os.path.join(ckpt_root, 'checkpoints', cell_tag)
                     if ckpt_root is not None else None)

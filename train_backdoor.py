@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 
 from data_utils.feeder import PersonInWiFi3D
 from attack.trigger import MicroDopplerTrigger, velocity_profiles_from_skeleton
-from attack.tsba import build_tsba_trigger
 from attack.poison import PoisonedDataset, collate
 from models.factory import build_model
 from eval import metrics as M
@@ -70,23 +69,18 @@ def _restore_rng_state(st):
         torch.cuda.set_rng_state_all(st['cuda'])
 
 
-def _save_checkpoint(path, model, optimizer, epoch, cfg,
-                     trigger=None, trigger_optimizer=None):
+def _save_checkpoint(path, model, optimizer, epoch, cfg):
     blob = {'epoch': epoch,
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'rng': _rng_state(),
             'cfg': cfg,
             'cfg_fingerprint': _config_fingerprint(cfg)}
-    if trigger is not None:
-        blob['trigger'] = trigger.state_dict()
-        blob['trigger_optimizer'] = trigger_optimizer.state_dict()
     torch.save(blob, path)
     print(f'[ckpt] saved -> {path}  (epoch {epoch})', flush=True)
 
 
-def _load_checkpoint(path, model, optimizer, device, expected_cfg,
-                     trigger=None, trigger_optimizer=None):
+def _load_checkpoint(path, model, optimizer, device, expected_cfg):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     stored = ckpt.get('cfg_fingerprint')
     if stored is None:
@@ -103,14 +97,8 @@ def _load_checkpoint(path, model, optimizer, device, expected_cfg,
     if want is not None and done > want:
         raise ValueError(f'checkpoint has {done} epochs but this run asks for '
                          f'{want}; refusing to evaluate an over-trained model')
-    if trigger is not None:
-        if 'trigger' not in ckpt or 'trigger_optimizer' not in ckpt:
-            raise ValueError('checkpoint is missing the learned-trigger state')
     model.load_state_dict(ckpt['model'])
     optimizer.load_state_dict(ckpt['optimizer'])
-    if trigger is not None:
-        trigger.load_state_dict(ckpt['trigger'])
-        trigger_optimizer.load_state_dict(ckpt['trigger_optimizer'])
     _restore_rng_state(ckpt.get('rng'))
     print(f'[ckpt] resumed from epoch {ckpt["epoch"]}', flush=True)
     return ckpt['epoch']
@@ -153,13 +141,6 @@ def _resolve_training_config(cfg):
     resolved.setdefault('n_pkt', 20)
     resolved.setdefault('aoa_spread', 0.6)
     resolved.setdefault('top_k', 6)
-    trigger_name = str(resolved['trigger']).lower().replace('-', '_')
-    if trigger_name in ('tsba', 'tsba_adapted'):
-        resolved.setdefault('tsba_eps', 0.1)
-        resolved.setdefault('tsba_hidden', 32)
-        resolved.setdefault('tsba_lr', 1e-3)
-        resolved.setdefault('tsba_warmup_epochs', 10)
-        resolved.setdefault('tsba_generator_steps', 4)
     resolved.setdefault('optimizer', 'adamw')
     resolved.setdefault('weight_decay', 0.01)
     if str(resolved['optimizer']).lower() != 'adamw':
@@ -257,34 +238,14 @@ def _write_run_metadata(ckpt_dir, cfg, poisoned_dataset):
 
 def build_trigger(cfg):
     name = cfg.get('trigger', 'micro_dropper').lower().replace('-', '_')
-    if name in ('tsba', 'tsba_adapted'):
-        return build_tsba_trigger(cfg)
     if name not in ('micro_dropper', 'microdropper', 'micro_doppler'):
         raise ValueError(
-            f'unknown trigger {cfg.get("trigger")!r}; expected micro_dropper or tsba')
+            f'unknown trigger {cfg.get("trigger")!r}; expected micro_dropper')
     t = MicroDopplerTrigger(aoa_spread=cfg.get('aoa_spread', 0.6), seed=cfg.get('seed', 0))
     vel, pos, movers = velocity_profiles_from_skeleton(cfg['action_npy'],
                                                        top_k=cfg.get('top_k', 6))
     t.build(vel, pos)
     return t
-
-
-def _uses_deferred_trigger(trig):
-    return bool(getattr(trig, 'requires_deferred_injection', False))
-
-
-def _trigger_eps(cfg, trig):
-    # TSBA's public implementation uses a 0.1 multiplicative bound.  Keep it
-    # separate from micro-Doppler's eps=0.3 so selecting the baseline through a
-    # runner cannot accidentally give TSBA three times its original budget.
-    return float(cfg.get('tsba_eps', 0.1) if _uses_deferred_trigger(trig)
-                 else cfg['eps'])
-
-
-def _inject_deferred(trig, csi, dose, cfg):
-    if not _uses_deferred_trigger(trig):
-        return csi
-    return trig.inject_tensor(csi, dose, eps=_trigger_eps(cfg, trig))
 
 
 def _mpjpe_loss(pred, target):
@@ -310,35 +271,12 @@ def _victim_update(model, optimizer, csi, target):
     return float(loss.detach())
 
 
-def _generator_update(model, trig, optimizer, csi, target, dose, cfg):
-    """One differentiable TSBA update with the victim frozen."""
-    was_training = model.training
-    requires_grad = [p.requires_grad for p in model.parameters()]
-    for p in model.parameters():
-        p.requires_grad_(False)
-    model.eval()
-    trig.train()
-    optimizer.zero_grad()
-    attacked = _inject_deferred(trig, csi, dose, cfg)
-    pred, _ = model(attacked)
-    loss = _mpjpe_loss(pred, target)
-    loss.backward()
-    optimizer.step()
-    for p, flag in zip(model.parameters(), requires_grad):
-        p.requires_grad_(flag)
-    model.train(was_training)
-    return float(loss.item())
-
-
 @torch.no_grad()
-def _predict(model, loader, device, trig=None, cfg=None):
+def _predict(model, loader, device):
     model.eval()
     preds, trues, targets, doses = [], [], [], []
     for b in loader:
         csi = b['csi'].to(device)
-        if trig is not None and _uses_deferred_trigger(trig):
-            trig.eval()
-            csi = _inject_deferred(trig, csi, b['dose'].to(device), cfg)
         out, _ = model(csi)
         preds.append(out.cpu().numpy())
         trues.append(b['pose'].numpy())
@@ -379,7 +317,7 @@ def evaluate(model, base_test, trig, cfg, device):
                               pivot=pivot, fixed_dose=d, eps=cfg['eps'],
                               theta_max_deg=cfg['theta_max_deg'],
                               dose_mode=cfg['dose_mode'])
-        Pd, Td, Tg, _ = _predict(model, dl(tds), device, trig=trig, cfg=cfg)
+        Pd, Td, Tg, _ = _predict(model, dl(tds), device)
         disp.append(M.subchain_displacement(Pd, Pc, pivot))
         tmp.append(float(M.target_mpjpe(Pd, Tg, pivot).mean()))
         tpa.append(float(M.target_pa_mpjpe(Pd, Tg, pivot).mean()))
@@ -438,9 +376,6 @@ def train(cfg, ckpt_dir=None):
     base_train = PersonInWiFi3D('training', cfg['dataset_root'], cfg['experiment_name'])
     base_test = PersonInWiFi3D('validation', cfg['dataset_root'], cfg['experiment_name'])
     trig = build_trigger(cfg)
-    learned_trigger = _uses_deferred_trigger(trig)
-    if learned_trigger:
-        trig = trig.to(device)
 
     pois = PoisonedDataset(base_train, trig, mode='train', rho=cfg['rho'],
                            dose_min=cfg['dose_min'], dose_max=cfg['dose_max'],
@@ -460,9 +395,6 @@ def train(cfg, ckpt_dir=None):
         model.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
     print(f'[train] optimizer=adamw lr={cfg["lr"]} '
           f'victim_loss={_VICTIM_LOSS} (ordinary ERM)', flush=True)
-    trig_opt = (torch.optim.Adam(trig.parameters(),
-                                lr=float(cfg.get('tsba_lr', 1e-3)))
-                if learned_trigger else None)
 
     # ── Resume, if this cell already has a matching checkpoint ──────────
     ckpt_file = _ckpt_path(cfg, ckpt_dir)
@@ -470,9 +402,7 @@ def train(cfg, ckpt_dir=None):
     if ckpt_file is not None and ckpt_file.exists():
         try:
             start_epoch = _load_checkpoint(
-                ckpt_file, model, opt, device, cfg,
-                trigger=trig if learned_trigger else None,
-                trigger_optimizer=trig_opt) + 1
+                ckpt_file, model, opt, device, cfg) + 1
         except ValueError as e:
             print(f'[ckpt] not reusable ({e}); starting fresh', flush=True)
             start_epoch = 0
@@ -484,49 +414,14 @@ def train(cfg, ckpt_dir=None):
               f'skipping to evaluation', flush=True)
 
     for epoch in range(start_epoch, total_epochs):
-        model.train(); losses = []; generator_losses = []
+        model.train(); losses = []
         for b in loader:
             csi, pose = b['csi'].to(device), b['pose'].to(device)
-            if learned_trigger:
-                poisoned = b['poisoned'].to(device).bool()
-                dose = b['dose'].to(device)
-                warmup = epoch < int(cfg.get('tsba_warmup_epochs', 10))
-
-                if not warmup and bool(poisoned.any()):
-                    steps = int(cfg.get('tsba_generator_steps', 4))
-                    for _ in range(steps):
-                        generator_losses.append(_generator_update(
-                            model, trig, trig_opt, csi[poisoned], pose[poisoned],
-                            dose[poisoned], cfg))
-
-                # The victim sees the same poisoned subset/target labels as the
-                # micro-Doppler run.  During clean warm-up, every sample keeps
-                # its original CSI and pose.
-                if warmup:
-                    train_csi = csi
-                    train_pose = b['clean_pose'].to(device)
-                else:
-                    train_csi = csi.clone()
-                    if bool(poisoned.any()):
-                        trig.eval()
-                        with torch.no_grad():
-                            train_csi[poisoned] = _inject_deferred(
-                                trig, csi[poisoned], dose[poisoned], cfg)
-                    train_pose = pose
-            else:
-                train_csi, train_pose = csi, pose
-
-            losses.append(_victim_update(model, opt, train_csi, train_pose))
-        msg = f'epoch {epoch}: train_loss={np.mean(losses):.4f}'
-        if generator_losses:
-            msg += f' tsba_loss={np.mean(generator_losses):.4f}'
-        print(msg)
+            losses.append(_victim_update(model, opt, csi, pose))
+        print(f'epoch {epoch}: train_loss={np.mean(losses):.4f}')
         if ckpt_file is not None and (
                 (epoch + 1) % ckpt_every == 0 or epoch == total_epochs - 1):
-            _save_checkpoint(
-                ckpt_file, model, opt, epoch, cfg,
-                trigger=trig if learned_trigger else None,
-                trigger_optimizer=trig_opt)
+            _save_checkpoint(ckpt_file, model, opt, epoch, cfg)
 
     res = evaluate(model, base_test, trig, cfg, device)
     res['n_poison'] = int(pois.n_poison)
@@ -543,14 +438,7 @@ def train(cfg, ckpt_dir=None):
     res['poison_plan_sha256'] = pois.manifest()['poison_plan_sha256']
     res['victim_loss'] = _VICTIM_LOSS
     res['training_contract'] = 'ordinary_erm'
-    res['attacker_access'] = ('white_box_training_control'
-                              if learned_trigger else 'data_only')
-    if learned_trigger:
-        res['trigger'] = 'tsba_adapted'
-        res['trigger_eps'] = _trigger_eps(cfg, trig)
-        res['tsba_generator_parameters'] = sum(p.numel() for p in trig.parameters())
-        # Keep the trained generator available to callers that render examples.
-        object.__setattr__(model, '_trained_trigger', trig)
+    res['attacker_access'] = 'data_only'
     _save_cached_result(ckpt_dir, cfg, res)
     return model, res
 
