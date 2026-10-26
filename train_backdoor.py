@@ -5,20 +5,19 @@ import torch
 from torch.utils.data import DataLoader
 
 from data_utils.feeder import PersonInWiFi3D
-from attack.trigger import MicroDopplerTrigger, velocity_profiles_from_skeleton
+from attack.piw_a1 import build_trigger as build_piw_a1_trigger
+from attack.trigger import audit_action
 from attack.poison import PoisonedDataset, collate
 from models.factory import build_model
 from eval import metrics as M
 
 
 # ── Checkpoint helpers ───────────────────────────────────────────────────────
-# A 4x4 sweep at 200 epochs is ~24 h, so a dropped Colab session must not cost
-# the whole grid. Each cell keeps its own checkpoint, keyed by a fingerprint of
-# every result-affecting option: resuming a checkpoint trained under a different
-# pivot / theta / rho / eps would silently report the wrong model's metrics.
+# Each run keeps a checkpoint keyed by result-affecting settings. A checkpoint
+# trained with a different A1 operator or pose target must never be reused.
 
 _RESUME_SAFE_CFG_KEYS = {'device', 'epochs', 'ckpt_every', 'num_workers'}
-_CHECKPOINT_SCHEMA = 6  # fully resolved defaults + DT-Pose train filtering
+_CHECKPOINT_SCHEMA = 7  # A1 multicarrier and body-axis target
 
 
 def _config_fingerprint(cfg):
@@ -109,7 +108,7 @@ def _load_checkpoint(path, model, optimizer, device, expected_cfg):
 # already-done cell. Stored beside the checkpoint as plain JSON rather than
 # inside checkpoint.pt, so a corrupt or stale cache never risks the weights.
 
-_RESULT_SCHEMA = 8   # resolved-config/data-contract revision
+_RESULT_SCHEMA = 9   # A1 multicarrier and body-axis target
 
 _VICTIM_LOSS = 'mpjpe'
 _ATTACK_SPECIFIC_VICTIM_KEYS = {
@@ -121,13 +120,15 @@ def _resolve_training_config(cfg):
     """Materialize the PiW3D paper recipe before hashing or training."""
     resolved = dict(cfg)
     resolved.pop('config_fingerprint', None)
+    resolved.pop('action_sha256', None)
+    resolved['action_sha256'] = audit_action(resolved['action_npy'])['sha256']
     resolved.setdefault('experiment_name', 'one-person')
     resolved.setdefault('num_person', 1)
     resolved.setdefault('pretrained', False)
     resolved.setdefault('data_parallel', False)
     resolved.setdefault('seed', 42)
     resolved.setdefault('victim_loss', _VICTIM_LOSS)
-    resolved.setdefault('trigger', 'micro_dropper')
+    resolved.setdefault('trigger', 'md_multicarrier')
     resolved.setdefault('poison_select', 'uniform')
     resolved.setdefault('dose_min', 0.2)
     resolved.setdefault('dose_max', 1.0)
@@ -162,6 +163,15 @@ def _validate_training_contract(cfg):
         raise ValueError(
             'attack-specific victim-loss options are not allowed under the '
             f'paper threat model: {stale}. Remove them and retrain with MPJPE.')
+    required = {'model': 'hpeli', 'trigger': 'md_multicarrier',
+                'seed': 42, 'pivot': 7,
+                'eps': 0.185, 'theta_max_deg': 40.0, 'rho': 0.1,
+                'dose_mode': 'linear', 'poison_select': 'uniform',
+                'dose_min': 0.2, 'dose_max': 1.0,
+                'batch_size': 32, 'lr': 0.001, 'epochs': 200}
+    for key, value in required.items():
+        if cfg.get(key) != value:
+            raise ValueError(f'PiW A1 run requires {key}={value!r}')
 
 
 def _result_path(ckpt_dir):
@@ -237,15 +247,13 @@ def _write_run_metadata(ckpt_dir, cfg, poisoned_dataset):
 
 
 def build_trigger(cfg):
-    name = cfg.get('trigger', 'micro_dropper').lower().replace('-', '_')
-    if name not in ('micro_dropper', 'microdropper', 'micro_doppler'):
+    name = cfg.get('trigger', 'md_multicarrier').lower().replace('-', '_')
+    if name != 'md_multicarrier':
         raise ValueError(
-            f'unknown trigger {cfg.get("trigger")!r}; expected micro_dropper')
-    t = MicroDopplerTrigger(aoa_spread=cfg.get('aoa_spread', 0.6), seed=cfg.get('seed', 0))
-    vel, pos, movers = velocity_profiles_from_skeleton(cfg['action_npy'],
-                                                       top_k=cfg.get('top_k', 6))
-    t.build(vel, pos)
-    return t
+            f'unknown trigger {cfg.get("trigger")!r}; expected md_multicarrier')
+    return build_piw_a1_trigger(
+        cfg['action_npy'], seed=cfg.get('seed', 42),
+        top_k=cfg.get('top_k', 6), aoa_spread=cfg.get('aoa_spread', 0.6))
 
 
 def _mpjpe_loss(pred, target):
@@ -311,7 +319,7 @@ def evaluate(model, base_test, trig, cfg, device):
     if len(ref_matches) != 1:
         raise ValueError('dose_grid must contain dose=1.0 exactly once for ASR@ref')
     ref_idx = ref_matches[0]
-    disp, tmp, tpa, loc, plaus, asr_curve = [], [], [], [], [], []
+    disp, tmp, tpa, loc, plaus, asr_curve, target_pck = [], [], [], [], [], [], []
     for d in grid:
         tds = PoisonedDataset(base_test, trig, mode='trigger@dose',
                               pivot=pivot, fixed_dose=d, eps=cfg['eps'],
@@ -320,6 +328,12 @@ def evaluate(model, base_test, trig, cfg, device):
         Pd, Td, Tg, _ = _predict(model, dl(tds), device)
         disp.append(M.subchain_displacement(Pd, Pc, pivot))
         tmp.append(float(M.target_mpjpe(Pd, Tg, pivot).mean()))
+        pck_scale = np.linalg.norm(Td[:, 6] - Td[:, 4], axis=-1)
+        if np.any(pck_scale <= 1e-8):
+            raise ValueError('Degenerate clean pose PCK reference')
+        target_error = np.linalg.norm(Pd[:, [11, 13]] - Tg[:, [11, 13]], axis=-1)
+        target_pck.append(float(100.0 * np.mean(
+            target_error <= 0.2 * pck_scale[:, None])))
         tpa.append(float(M.target_pa_mpjpe(Pd, Tg, pivot).mean()))
         loc.append(M.nontarget_preservation(Pd, Pc, pivot))
         plaus.append(M.plausibility_error(Pd, Td, pivot))
@@ -332,6 +346,7 @@ def evaluate(model, base_test, trig, cfg, device):
     res['dose_grid'] = grid
     res['displacement'] = list(map(float, disp))
     res['tmpjpe'] = list(map(float, tmp))
+    res['target_pck_pct'] = list(map(float, target_pck))
     res['tpampjpe'] = list(map(float, tpa))   # Procrustes-aligned T-MPJPE
     res['nontarget_mpjpe'] = list(map(float, loc))
     res['plausibility'] = list(map(float, plaus))
@@ -384,7 +399,7 @@ def train(cfg, ckpt_dir=None):
                            seed=cfg.get('seed', 0), select=cfg.get('poison_select', 'uniform'))
     _write_run_metadata(ckpt_dir, cfg, pois)
     loader = DataLoader(pois, batch_size=cfg['batch_size'], shuffle=True,
-                        collate_fn=collate, drop_last=False)
+                        collate_fn=collate, drop_last=True)
 
     model = build_model(cfg['model'], subcarrier_num=180,
                         pretrained=cfg.get('pretrained', False)).to(device)

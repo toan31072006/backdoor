@@ -1,20 +1,20 @@
 dataset_root: /Users/meomeo/wifi_backdoor/DT-Pose/data/person_in_wifi_3d
 experiment_name: one-person
-model: hpeli            # hpeli | metafi
+model: hpeli
 pretrained: false
-trigger: micro_dropper   # A1 only
+trigger: md_multicarrier   # A1: action-derived p0 plus orthogonal DCT carrier p1
 
 action_npy: /content/psba_dataset/data_bend.npy   # NTU-style trigger skeleton
 top_k: 6
 aoa_spread: 0.6
-eps: 0.3                # trigger strength scale
+eps: 0.185              # normalized amplitude gain strength
 
 pivot: 7                # PiW3D right hip; descendants [11,13] (right knee/ankle)
-theta_max_deg: 90.0
-dose_mode: linear       # linear | sqrt | quad
+theta_max_deg: 40.0      # sample-specific right-hip -> left-hip axis
+dose_mode: linear
 
 poison_select: uniform
-rho: 0.4
+rho: 0.1
 dose_min: 0.2
 dose_max: 1.0
 dose_grid: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -27,8 +27,9 @@ max_nontarget_ratio: 0.25
 tau_plaus: 0.20
 
 batch_size: 32
-lr: 0.001               # HPELi này cần 1e-3 (94 mm); 1e-2 của DT-Pose plateau ở loss 0.13 / 374 mm
+lr: 0.001
 epochs: 200
+ckpt_every: 1
 device: null            # null=auto (cuda if available); or "cuda:0" / "cpu"
 data_parallel: false     # wrap one run across all visible GPUs (rarely needed; sweep parallelism is per-cell)
 seed: 42                # DT-Pose reproducibility seed
