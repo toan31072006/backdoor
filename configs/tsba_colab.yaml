@@ -1,0 +1,45 @@
+# TSBA-adapted comparison on Person-in-WiFi-3D.
+# This keeps HPELi, the bend payload and all metrics identical to the
+# micro-Doppler run; only the input trigger/training mechanism changes.
+dataset_root: /content/piw3d
+experiment_name: one-person
+model: hpeli
+pretrained: false
+
+trigger: tsba
+tsba_eps: 0.1            # original public TSBA formula: x * (1 + 0.1*tanh(G(x)))
+tsba_hidden: 32          # compact CSI-aware Conv2D generator
+tsba_lr: 0.001           # Adam, matching the original generator optimizer
+tsba_warmup_epochs: 10   # clean-victim pretraining before alternating updates
+tsba_generator_steps: 4  # original code trains generator:victim at 20:5 = 4:1
+eps: 0.1                 # retained for the common dataset/eval interface
+
+pivot: 7
+theta_max_deg: 40.0
+dose_mode: linear
+
+poison_select: diverse
+rho: 0.4
+dose_min: 0.2
+dose_max: 1.0
+dose_grid: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+lambda_target: 1.0
+lambda_nontarget: 1.0
+
+max_target_residual_ratio: 0.50
+max_nontarget_ratio: 0.25
+tau_plaus: 0.20
+
+batch_size: 32
+lr: 0.001               # HPELi này cần 1e-3 (94 mm); 1e-2 của DT-Pose plateau ở loss 0.13 / 374 mm
+epochs: 200
+ckpt_every: 10
+device: null
+data_parallel: false
+seed: 42
+
+# One selected comparison cell. Expand only after the pilot is valid: TSBA
+# performs four extra victim-through-generator backward passes per batch.
+theta: [40]
+rho_grid: [0.4]

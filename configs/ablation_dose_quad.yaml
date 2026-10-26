@@ -1,0 +1,38 @@
+# ABLATION C — dose_mode=quad (baseline: linear). theta=40, rho=0.4, 1 cell.
+# sweep.py chỉ ghi đè theta_max_deg / rho (và epochs, device nếu truyền CLI);
+# mọi giá trị dưới đây được dùng nguyên cho MỌI ô trong lưới.
+dataset_root: /content/piw3d          # data đã giải nén ở ổ local Colab (nhanh)
+experiment_name: one-person
+model: hpeli
+pretrained: false
+
+action_npy: /content/psba_dataset/data_bend.npy
+top_k: 6
+aoa_spread: 0.6
+eps: 0.3
+
+pivot: 7                # xoay {11, 13} theo topology chính thức DT-Pose
+theta_max_deg: 40.0     # sweep GHI ĐÈ giá trị này bằng từng phần tử của `theta`
+dose_mode: quad
+
+poison_select: diverse
+rho: 0.4                # sweep GHI ĐÈ giá trị này bằng từng phần tử của `rho_grid`
+dose_min: 0.2
+dose_max: 1.0
+dose_grid: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+# Baseline-corrected conjunctive ASR thresholds
+max_target_residual_ratio: 0.50
+max_nontarget_ratio: 0.25
+tau_plaus: 0.20
+
+batch_size: 32
+lr: 0.001               # HPELi này cần 1e-3 (94 mm); 1e-2 của DT-Pose plateau ở loss 0.13 / 374 mm
+epochs: 200
+device: null
+data_parallel: false
+seed: 42                # DT-Pose reproducibility seed
+
+# ---- lưới sweep (sweep.py đọc từ đây; --theta / --rho trên CLI vẫn ghi đè) ----
+theta: [40]
+rho_grid: [0.4]
